@@ -1,70 +1,48 @@
 import sys
 import json
 import os
-from bs4 import BeautifulSoup
+import pandas as pd
 import joblib
-
-def extract_features(html: str):
-    soup = BeautifulSoup(html, 'html.parser')
-    tags = soup.find_all(True)
-    
-    num_tags = len(tags)
-    depths = [len(list(tag.parents)) for tag in tags]
-    max_depth = max(depths) if depths else 0
-    
-    classes = []
-    for tag in tags:
-        classes.extend(tag.get('class', []))
-    num_classes = len(classes)
-    
-    has_layout = int(any(c in ['flex', 'grid', 'absolute', 'relative'] for c in classes))
-    has_colors = int(any(c.startswith('bg-') or c.startswith('text-') for c in classes))
-    has_padding = int(any(c.startswith('p-') or c.startswith('px-') or c.startswith('py-') for c in classes))
-    
-    empty_tags = sum(1 for tag in tags if not tag.text.strip() and not tag.find_all())
-    empty_ratio = empty_tags / num_tags if num_tags > 0 else 1.0
-
-    return [[
-        num_tags,
-        max_depth,
-        num_classes,
-        has_layout,
-        has_colors,
-        has_padding,
-        empty_ratio
-    ]]
+from features import extract_advanced_features
 
 def run_inference(html_path):
     try:
         with open(html_path, 'r', encoding='utf-8') as f:
             html = f.read()
             
-        model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ui_critic_model.pkl')
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(base_dir, 'ui_critic_ensemble.pkl')
         
         if not os.path.exists(model_path):
-            print(json.dumps({"error": "Model not found. Run train.py first."}))
+            print(json.dumps({"error": "Ensemble Pipeline not found. Run train.py first."}))
             sys.exit(1)
             
-        clf = joblib.load(model_path)
-        features = extract_features(html)
+        # Load the Master Ensemble Pipeline (includes Preprocessor + VotingClassifier)
+        pipeline = joblib.load(model_path)
         
-        prediction = clf.predict(features)[0]
-        probabilities = clf.predict_proba(features)[0]
-        score = probabilities[1] * 100  # Probability of being "Good"
+        # Extract features (returns dict)
+        raw_features_dict = extract_advanced_features(html)
         
-        # Generate deterministic critique based on feature analysis
+        # Pipeline expects a DataFrame for ColumnTransformer routing
+        df = pd.DataFrame([raw_features_dict])
+        
+        # Predict
+        prediction = pipeline.predict(df)[0]
+        probabilities = pipeline.predict_proba(df)[0]
+        score = probabilities[1] * 100  
+        
+        # Generate deterministic critique based on the raw metrics
         critique = "Looks good"
         if prediction == 0:
-            critique = "The UI is structurally poor. "
-            feat = features[0]
-            if feat[0] < 10:
-                critique += "It doesn't have enough elements (too blank). "
-            if feat[2] < 10:
-                critique += "It is missing Tailwind classes (unstyled). "
-            if feat[3] == 0:
-                critique += "It is missing layout classes like flex or grid. "
-            if feat[6] > 0.5:
-                critique += "There are too many empty tags without text. "
+            critique = "The Ensemble Model rejected this UI. "
+            if raw_features_dict['tailwind_density'] < 0.5:
+                critique += "It lacks Tailwind class density. "
+            if raw_features_dict['layout_cohesion'] < 0.1:
+                critique += "It is missing layout structure (flex, grid). "
+            if raw_features_dict['empty_ratio'] > 0.5:
+                critique += "There are too many empty tags. "
+            if raw_features_dict['semantic_ratio'] < 0.1:
+                critique += "Use semantic HTML tags (nav, main, button) instead of just divs. "
                 
             critique += "Please rewrite the HTML to fix these structural issues."
         
