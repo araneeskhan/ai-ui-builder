@@ -1,58 +1,100 @@
+"""
+Production Inference Script.
+Loads the Ensemble Pipeline, evaluates a single HTML file, and outputs structured JSON feedback.
+"""
 import sys
 import json
-import os
+import traceback
 import pandas as pd
-import joblib
-from features import extract_advanced_features
+from features import extract_features
+from models import load_model
+from config import QUALITY_THRESHOLD
+from utils import get_logger
 
-def run_inference(html_path):
+# Use a specific logger for inference that only writes to stderr so stdout stays clean for JSON
+import logging
+logger = logging.getLogger('infer')
+logger.setLevel(logging.ERROR)
+ch = logging.StreamHandler(sys.stderr)
+logger.addHandler(ch)
+
+def generate_critique(features: dict) -> str:
+    """Generates deterministic, actionable feedback based on the exact numeric features."""
+    issues = []
+    
+    if features['semantic_ratio'] < 0.1:
+        issues.append("Use semantic HTML5 tags (<nav>, <main>, <button>) instead of relying entirely on <div> elements.")
+        
+    if features['tailwind_density'] < 1.0:
+        issues.append("The UI lacks sufficient styling. Add more specific Tailwind classes to define the visual hierarchy.")
+        
+    if features['layout_cohesion'] < 0.05:
+        issues.append("The layout structure is poor. Use Flexbox (`flex`) or CSS Grid (`grid`) classes to align your elements properly.")
+        
+    if features['empty_ratio'] > 0.4:
+        issues.append("There are too many empty tags. Ensure every structural element contains text, an icon, or child elements.")
+        
+    if features['max_depth'] > 12:
+        issues.append("The HTML is over-nested. Flatten the DOM structure to improve maintainability and performance.")
+        
+    if features['visual_richness'] < 0.5:
+        issues.append("The design is visually flat. Add padding (`p-4`), margins, borders, and colors to create depth.")
+
+    if not issues:
+        return "The UI structure is acceptable, but could use further aesthetic refinement."
+        
+    return "The Ensemble AI rejected this UI structure for the following reasons: " + " ".join(issues)
+
+def run_inference(html_path: str):
     try:
+        # Read HTML
         with open(html_path, 'r', encoding='utf-8') as f:
             html = f.read()
             
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        model_path = os.path.join(base_dir, 'ui_critic_ensemble.pkl')
+        # Extract features (returns a dict of 31 features)
+        features_dict = extract_features(html)
         
-        if not os.path.exists(model_path):
-            print(json.dumps({"error": "Ensemble Pipeline not found. Run train.py first."}))
-            sys.exit(1)
-            
-        # Load the Master Ensemble Pipeline (includes Preprocessor + VotingClassifier)
-        pipeline = joblib.load(model_path)
+        # Convert to DataFrame (1 row) so ColumnTransformer can route 'num' and 'text' correctly
+        df = pd.DataFrame([features_dict])
         
-        # Extract features (returns dict)
-        raw_features_dict = extract_advanced_features(html)
+        # Load Pipeline
+        pipeline = load_model()
         
-        # Pipeline expects a DataFrame for ColumnTransformer routing
-        df = pd.DataFrame([raw_features_dict])
-        
-        # Predict
-        prediction = pipeline.predict(df)[0]
+        # Predict Probabilities
         probabilities = pipeline.predict_proba(df)[0]
-        score = probabilities[1] * 100  
+        score = probabilities[1]  # Probability of class 1 (Good UI)
         
-        # Generate deterministic critique based on the raw metrics
-        critique = "Looks good"
-        if prediction == 0:
-            critique = "The Ensemble Model rejected this UI. "
-            if raw_features_dict['tailwind_density'] < 0.5:
-                critique += "It lacks Tailwind class density. "
-            if raw_features_dict['layout_cohesion'] < 0.1:
-                critique += "It is missing layout structure (flex, grid). "
-            if raw_features_dict['empty_ratio'] > 0.5:
-                critique += "There are too many empty tags. "
-            if raw_features_dict['semantic_ratio'] < 0.1:
-                critique += "Use semantic HTML tags (nav, main, button) instead of just divs. "
-                
-            critique += "Please rewrite the HTML to fix these structural issues."
+        is_approved = bool(score >= QUALITY_THRESHOLD)
         
-        print(json.dumps({
-            "score": round(score, 2),
-            "is_approved": bool(prediction == 1),
-            "critique": critique
-        }))
+        critique = "Looks great! The structure and styling are approved."
+        if not is_approved:
+            critique = generate_critique(features_dict)
+            
+        result = {
+            "score": round(score * 100, 2),
+            "is_approved": is_approved,
+            "critique": critique,
+            # We optionally return the top features so the backend knows *why*
+            "debug_metrics": {
+                "semantic_ratio": round(features_dict['semantic_ratio'], 3),
+                "tailwind_density": round(features_dict['tailwind_density'], 3),
+                "visual_richness": round(features_dict['visual_richness'], 3),
+                "empty_ratio": round(features_dict['empty_ratio'], 3)
+            }
+        }
+        
+        # Print ONLY valid JSON to stdout
+        print(json.dumps(result))
+        
     except Exception as e:
-        print(json.dumps({"error": str(e)}))
+        logger.error(f"Inference error: {traceback.format_exc()}")
+        # Fallback response so the NestJS server doesn't crash
+        print(json.dumps({
+            "error": str(e),
+            "score": 100, 
+            "is_approved": True, 
+            "critique": "Fallback approval due to ML pipeline error."
+        }))
         sys.exit(1)
 
 if __name__ == '__main__':

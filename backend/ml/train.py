@@ -1,109 +1,113 @@
-import os
-import random
-import pandas as pd
-import numpy as np
-import joblib
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.feature_extraction.text import TfidfVectorizer
+"""
+Master Training Orchestrator.
+Generates data, extracts features, trains the ensemble, evaluates, and saves reports.
+"""
+import time
 from sklearn.model_selection import train_test_split
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, accuracy_score
-from features import extract_advanced_features, NUMERIC_FEATURES, TEXT_FEATURE
+import pandas as pd
 
-def generate_good_html():
-    items = random.randint(3, 8)
-    lis = "".join([f'<li class="flex items-center gap-2 text-zinc-300"><i class="fas fa-check text-emerald-400"></i>Item {i}</li>' for i in range(items)])
-    return f"""
-    <div class="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900 p-8">
-        <h3 class="text-lg font-semibold text-white">Pro Plan</h3>
-        <p class="mt-1 text-sm text-zinc-400">Description here</p>
-        <ul class="mt-8 space-y-3">
-            {lis}
-        </ul>
-        <button class="mt-8 w-full rounded-xl bg-indigo-600 py-3 text-sm font-semibold text-white hover:bg-indigo-500 transition-colors">Subscribe</button>
-    </div>
-    """
+from config import NUM_SAMPLES, TRAIN_TEST_SPLIT, RANDOM_SEED
+from data_generator import generate_raw_dataset
+from features import extract_features_batch
+from models import build_ensemble_pipeline, save_model
+from evaluate import run_full_evaluation
+from utils import get_logger, timed, save_training_report
 
-def generate_bad_html():
-    bad_type = random.choice(['div_soup', 'empty', 'unstyled'])
-    if bad_type == 'div_soup':
-        return "<div>" * 10 + "Text" + "</div>" * 10
-    elif bad_type == 'empty':
-        return '<div class="flex bg-zinc-900"></div>'
-    else:
-        return '<div><h1>Title</h1><p>Text</p><button class="btn">Click</button></div>'
+logger = get_logger('train')
 
-def build_dataset(num_samples=2000):
-    print(f"Procedurally generating {num_samples} raw HTML strings...")
-    data = []
-    labels = []
+@timed
+def main():
+    print("\n" + "="*60)
+    print("🚀 INITIALIZING MASTER'S LEVEL ML ENSEMBLE PIPELINE")
+    print("="*60 + "\n")
     
-    for _ in range(num_samples // 2):
-        html = generate_good_html()
-        data.append(extract_advanced_features(html))
-        labels.append(1)
-        
-    for _ in range(num_samples // 2):
-        html = generate_bad_html()
-        data.append(extract_advanced_features(html))
-        labels.append(0)
-        
-    df = pd.DataFrame(data)
-    return df, np.array(labels)
+    start_time = time.time()
 
-def train_ensemble_pipeline():
-    print("==============================================")
-    print("   Starting High-Level Ensemble ML Pipeline")
-    print("==============================================")
+    # ─────────────────────────────────────────────────────────
+    # 1. Data Generation
+    # ─────────────────────────────────────────────────────────
+    logger.info("PHASE 1: Data Engineering")
+    html_list, labels = generate_raw_dataset(NUM_SAMPLES)
     
-    X, y = build_dataset(2000)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # ─────────────────────────────────────────────────────────
+    # 2. Feature Extraction
+    # ─────────────────────────────────────────────────────────
+    logger.info("PHASE 2: Advanced Feature Extraction")
+    X = extract_features_batch(html_list)
+    y = pd.Series(labels)
     
-    print("\n--- 1. Building Heterogeneous Pipeline ---")
-    # ColumnTransformer routes numeric data to the Scaler, and text data to the TF-IDF Vectorizer
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', StandardScaler(), NUMERIC_FEATURES),
-            ('text', TfidfVectorizer(max_features=500), TEXT_FEATURE)
-        ]
+    logger.info(f"Dataset Shape: {X.shape[0]} samples, {X.shape[1]} features")
+
+    # ─────────────────────────────────────────────────────────
+    # 3. Train/Test Split
+    # ─────────────────────────────────────────────────────────
+    logger.info("PHASE 3: Dataset Splitting")
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, 
+        test_size=TRAIN_TEST_SPLIT, 
+        random_state=RANDOM_SEED, 
+        stratify=y  # Ensure balanced classes in both splits
     )
+    logger.info(f"Training on {len(X_train)} samples, validating on {len(X_test)} samples.")
+
+    # ─────────────────────────────────────────────────────────
+    # 4. Model Building & Training
+    # ─────────────────────────────────────────────────────────
+    logger.info("PHASE 4: Ensemble Training")
+    pipeline = build_ensemble_pipeline()
     
-    print("--- 2. Building Ensemble Classifier ---")
-    # Model A: Structural features handled primarily by Random Forest
-    rf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-    
-    # Model B: Semantic text features handled well by Logistic Regression (SVM-like)
-    lr = LogisticRegression(max_iter=1000, random_state=42)
-    
-    # The Fusion: Soft Voting Classifier combines their probabilities
-    ensemble = VotingClassifier(
-        estimators=[('rf', rf), ('lr', lr)],
-        voting='soft'
-    )
-    
-    # Complete Pipeline
-    pipeline = Pipeline(steps=[
-        ('preprocessor', preprocessor),
-        ('classifier', ensemble)
-    ])
-    
-    print("--- 3. Training Ensemble Model... ---")
+    logger.info("Fitting Pipeline (StandardScaler -> TF-IDF -> Soft Voting Ensemble)...")
     pipeline.fit(X_train, y_train)
+    logger.info("Training complete.")
+
+    # ─────────────────────────────────────────────────────────
+    # 5. Evaluation
+    # ─────────────────────────────────────────────────────────
+    logger.info("PHASE 5: Evaluation")
     
-    print("\n--- 4. Evaluation ---")
+    # Predict classes and probabilities
     preds = pipeline.predict(X_test)
-    print(f"Accuracy: {accuracy_score(y_test, preds) * 100:.2f}%\n")
-    print("Classification Report:\n", classification_report(y_test, preds))
+    probs = pipeline.predict_proba(X_test)[:, 1]
     
-    print("\n--- 5. Saving Production Pipeline ---")
-    save_dir = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(save_dir, 'ui_critic_ensemble.pkl')
-    joblib.dump(pipeline, model_path)
-    print(f"-> Master Pipeline saved successfully to {model_path}.")
-    print("\n[Done] Your Ensemble AI is ready for inference!")
+    acc = accuracy_score(y_test, preds)
+    logger.info(f"Test Accuracy: {acc * 100:.2f}%")
+    
+    report_str = classification_report(y_test, preds, digits=4)
+    print("\n" + "="*40)
+    print("CLASSIFICATION REPORT")
+    print("="*40)
+    print(report_str)
+    
+    # Generate Charts
+    run_full_evaluation(y_test, preds, probs, pipeline)
+
+    # ─────────────────────────────────────────────────────────
+    # 6. Persistence
+    # ─────────────────────────────────────────────────────────
+    logger.info("PHASE 6: Saving Production Assets")
+    
+    model_path = save_model(pipeline, 'ui_critic_ensemble.pkl')
+    
+    # Extract classification report as dict for JSON
+    report_dict = classification_report(y_test, preds, output_dict=True)
+    
+    metrics = {
+        'accuracy': acc,
+        'precision': report_dict['1']['precision'],
+        'recall': report_dict['1']['recall'],
+        'f1_score': report_dict['1']['f1-score'],
+    }
+    
+    save_training_report(metrics, {'ensemble_type': 'soft_voting'}, 'ui_critic')
+    
+    total_time = time.time() - start_time
+    print("\n" + "="*60)
+    print(f"✅ PIPELINE COMPLETE IN {total_time:.2f} SECONDS")
+    print(f"Model saved to: {model_path}")
+    print("Evaluation charts saved to the /reports/ directory.")
+    print("="*60 + "\n")
+
 
 if __name__ == '__main__':
-    train_ensemble_pipeline()
+    main()
